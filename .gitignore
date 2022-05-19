@@ -1,0 +1,7 @@
+.DS_Store
+rpmbuild/*
+!rpmbuild/SPECS/
+release/
+extension/
+.devcontainer/src/eossdk.py
+manifest.txt

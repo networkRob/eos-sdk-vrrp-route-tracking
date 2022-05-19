@@ -1,0 +1,510 @@
+#!/usr/bin/env python
+
+# Copyright (c) 2022, Arista Networks, Inc.
+# All rights reserved.
+#
+# Redistribution and use in source and binary forms, with or without
+# modification, are permitted provided that the following conditions are
+# met:
+#  - Redistributions of source code must retain the above copyright notice,
+# this list of conditions and the following disclaimer.
+#  - Redistributions in binary form must reproduce the above copyright
+# notice, this list of conditions and the following disclaimer in the
+# documentation and/or other materials provided with the distribution.
+#  - Neither the name of Arista Networks nor the names of its
+# contributors may be used to endorse or promote products derived from
+# this software without specific prior written permission.
+#
+# THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+# "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+# LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
+# A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL ARISTA NETWORKS
+# BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+# CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+# SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR
+# BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
+# WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE
+# OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN
+# IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+#
+# eos-sdk-vrrp-route-tracking
+#
+#    Written by:
+#       Rob Martin, Arista Networks
+#
+
+"""
+This EOS SDK script will mount the state of the Route Table
+"""
+
+import ipaddress
+import eossdk
+import syslog
+import sys
+import json
+import time
+
+__author__ = 'robmartin'
+__version__ = '0.2.0'
+
+ALL_HOSTS = {}
+ALL_VLANS = {}
+DEFAULT_MASTER = 110
+DEFAULT_STANDBY = 90
+DEFAULT_VRF = "default"
+DEFAULT_DELAY = 8
+
+class DESTHOST():
+    def __init__(self, host_name, host_ip):
+        self.name = host_name
+        self.full_ip = host_ip
+        self.ip_address = ""
+        self.route_network = ''
+        self.next_hop = ''
+        self.status_msg = ""
+
+    def set_prefix(self, ip_route):
+        self.route_network = ip_route
+
+    def set_next_hop(self, via):
+        self.next_hop = via
+
+    def set_msg(self,msg):
+        self.status_msg = msg
+    
+    def del_msg(self):
+        self.status_msg = ''
+
+# Create class for VLAN/VRRP config
+class VRRPNODE():
+    def __init__(self, vlan_id, vrrp_id, master_priority, standby_priority, current_status, vrf):
+        self.vlan_id = vlan_id
+        self.vrrp_id = vrrp_id
+        self.master = master_priority
+        self.standby = standby_priority
+        self.status = current_status
+        self.vrf = vrf
+
+
+
+class ROUTETRACK(eossdk.AgentHandler, eossdk.FibHandler, eossdk.VrfHandler, eossdk.EapiMgr):
+    def __init__(self, fibMgr, agentMgr, vrfMgr, eapiMgr):
+        eossdk.AgentHandler.__init__(self,agentMgr)
+        eossdk.FibHandler.__init__(self,fibMgr)
+        eossdk.VrfHandler.__init__(self, vrfMgr)
+        # eossdk.EapiMgr.__init__(self, eapiMgr)
+        self.tracer = eossdk.Tracer("EosSdkRouteTrack")
+        self.fibMgr_ = fibMgr
+        self.agentMgr_ = agentMgr
+        self.vrfMgr_ = vrfMgr
+        self.eapiMgr_ = eapiMgr
+        self.VRF = DEFAULT_VRF #Default VRF if it has not bee`n configured on the switch
+        self.MASTER = DEFAULT_MASTER
+        self.STANDBY = DEFAULT_STANDBY
+        self.tracer.trace0("Constructed")
+
+    def on_initialized(self):
+        self.tracer.trace0("We are initialized!")
+        self.agentMgr_.status_set("VRF", str(self.VRF))
+        self.agentMgr_.status_set("Master-Priority", str(self.MASTER))
+        self.agentMgr_.status_set("Standby-Priority", str(self.STANDBY))
+        self._to_syslog("Agent STARTED", 'Route Tracking Agent Initialized')
+        # Loop through any pre existing configurations to load
+        for _option in self.agentMgr_.agent_option_iter():
+            self.on_agent_option(_option, self.agentMgr_.agent_option(_option))
+
+    def on_agent_option(self,optionName, value):
+        """
+        Function called when Daemon Option config added.
+        """
+        self._to_syslog("Option ADDED", "Key: {key}, Value: {value}".format(
+            key = optionName,
+            value = value
+        ))
+        # Config options and check for VRF option/value
+        if optionName.lower() == 'vrf':
+            if value:
+                if self.vrfMgr_.exists(value):
+                    self._to_syslog("INFO", "VRF {vrf} is already available and configured.".format(
+                        vrf = value
+                    ))
+                    # if 'ns-' not in value:
+                    #     value = 'ns-' + value
+                    self._to_syslog("INFO", "VRF value changed from %s to %s"%(self.VRF,value))
+                    self.VRF = value
+                else:
+                    self._to_syslog("INFO", "VRF {vrf} is not configured on this device. Please configure it first.".format(
+                        vrf = value
+                    ))
+            else:
+                self._to_syslog("INFO", "VRF value changed from %s to default"%(self.VRF))
+                self.VRF = 'default'
+        # Check if vlan is in option name
+        elif "vlan" in optionName.lower():
+            _vlan_id = optionName.lower()
+            if value:
+                if _vlan_id in ALL_VLANS:
+                    if ALL_VLANS[_vlan_id].vrrp_id != value:
+                        self._to_syslog("INFO", "VRRP ID for {vlan} has changed from {old_id} to {new_id}".format(
+                            vlan = _vlan_id.replace("vlan", ""),
+                            old_id = ALL_VLANS[_vlan_id].vrrp_id,
+                            new_id = value
+                        ))
+                        ALL_VLANS[_vlan_id].vrrp_id = value
+                    else:
+                        self._to_syslog("INFO", "VLAN {vlan} is already available and configured.".format(
+                            vlan = _vlan_id.replace("vlan", "")
+                        ))
+                else:
+                    status = self.get_vrrp_status(_vlan_id, value)
+                    if not status:
+                        status = "Not Active"
+                    self.agentMgr_.status_set(_vlan_id, status)
+                    self._to_syslog("INFO", "VRRP for VLAN {vlan} is currently {status}".format(
+                        vlan = _vlan_id.replace("vlan", ""),
+                        status = status
+                    ))
+                    ALL_VLANS[_vlan_id] = VRRPNODE(_vlan_id, value, self.MASTER, self.STANDBY, status, self.VRF)
+            else:
+                self._to_syslog("INFO", "Removing VLAN {vlan} from Route Tracking".format(
+                    vlan = _vlan_id.replace("vlan", "")
+                ))
+                self.agentMgr_.status_del(_vlan_id)
+                ALL_VLANS.pop(_vlan_id)
+        elif optionName.lower() == "master":
+            if value:
+                try:
+                    value = int(value)
+                except ValueError:
+                    self._to_syslog("Option Error", "The value for {name} is not of type integer, {value}".format(
+                        name = optionName,
+                        value = value
+                    ))
+                if type(value) == int:
+                    if value != self.MASTER:
+                        if value > self.STANDBY:
+                            self._to_syslog("INFO", "Master priofity level {master} is higher than current standby level {standby}".format(
+                                master = value,
+                                standby = self.STANDBY
+                            ))
+                            self._to_syslog("Master Level Update", "Master priority value is being updated from {old} to {new}".format(
+                                old = self.MASTER,
+                                new = value
+                            ))
+                            self.MASTER = value
+                            self.agentMgr_.status_set("Master-Priority", str(self.MASTER))
+                        else:
+                            self._to_syslog("MASTER LEVEL INFO", "The configured master level priority {master} is lower than the current standby of {lower}".format(
+                                master = value,
+                                lower = self.STANDBY
+                            ))
+                    else:
+                        self._to_syslog("Master Level INFO", "Configured Master priority value matches the current set of {value}".format(
+                            value = self.MASTER
+                        ))
+            else:
+                self._to_syslog("Master Level Update", "Setting the Master priority level back to the default of {value} from {old}".format(
+                    value = DEFAULT_MASTER,
+                    old = self.MASTER
+                ))
+                self.MASTER = DEFAULT_MASTER
+                self.agentMgr_.status_set("Master-Priority", str(self.MASTER))
+        elif optionName.lower() == "standby":
+            if value:
+                try:
+                    value = int(value)
+                except ValueError:
+                    self._to_syslog("Option Error", "The value for {name} is not of type integer, {value}".format(
+                        name = optionName,
+                        value = value
+                    ))
+                if type(value) == int:
+                    if value != self.STANDBY:
+                        if value < self.MASTER:
+                            self._to_syslog("INFO", "Standby priority level {standby} is lower than current master level {master}".format(
+                                master = self.MASTER,
+                                standby = value
+                            ))
+                            self._to_syslog("Standby Level Update", "Standby priority value is being updated from {old} to {new}".format(
+                                old = self.STANDBY,
+                                new = value
+                            ))
+                            self.STANDBY = value
+                            self.agentMgr_.status_set("Standby-Priority", str(self.STANDBY))
+                        else:
+                            self._to_syslog("Standby LEVEL INFO", "The configured standby level priority {standby} is higher than the current master of {master}".format(
+                                standby = value,
+                                master = self.MASTER
+                            ))
+                    else:
+                        self._to_syslog("Standby Level INFO", "Configured Standby priority value matches the current set of {value}".format(
+                            value = self.STANDBY
+                        ))
+            else:
+                self._to_syslog("Standby Level Update", "Setting the Standby priority level back to the default of {value} from {old}".format(
+                    value = DEFAULT_STANDBY,
+                    old = self.STANDBY
+                ))
+                self.STANDBY = DEFAULT_STANDBY
+                self.agentMgr_.status_set("Standby-Priority", str(self.STANDBY))
+            
+        # Catch All for any destinations/hosts
+        else:
+            new_host = True
+            # Called if route option is to be removed
+            if not value:
+                self._to_syslog("Option REMOVED", "Remove destination {dest}".format(
+                    dest = optionName
+                ))
+                self._remove_host(optionName)
+            #Addition/Update of route
+            else:
+                _node_ip = self.verify_ip_addr(value)
+                if optionName in ALL_HOSTS:
+                    if ALL_HOSTS[optionName].ip != '':
+                        new_host = False
+                # Check if IP Address if valid
+                if _node_ip:
+                    if new_host:
+                            self._to_syslog("Destination ADDED", "{node} address added for updates".format(
+                                node = optionName
+                            ))
+                            new_host = DESTHOST(optionName, _node_ip)
+                            new_host.set_msg("Initializing Route Tracking")
+                            ALL_HOSTS[optionName] = new_host
+                            self.agentMgr_.status_set(optionName, new_host.status_msg)
+                    else:
+                        if optionName in ALL_HOSTS:
+                            ALL_HOSTS[optionName].full_ip = _node_ip
+                    route_prefix = self.find_route_prefix(_node_ip)
+                    if route_prefix:
+                        _route_via = self.get_route_via(route_prefix)
+                        _str_next_hop = _route_via.intf().to_string()
+                        _str_route_prefix = route_prefix.route_key().prefix().to_string()
+                        self._to_syslog("INFO", "Found {route} route via destination {via}".format(
+                            route = _str_route_prefix,
+                            via = _str_next_hop
+                        ))
+                        ALL_HOSTS[optionName].set_prefix(_str_route_prefix)
+                        ALL_HOSTS[optionName].set_next_hop(_str_next_hop)
+                        ALL_HOSTS[optionName].set_msg("{network} network via {hop} next-hop".format(
+                            network = _str_route_prefix,
+                            hop = _str_next_hop
+                        ))
+                        self.agentMgr_.status_set(optionName, new_host.status_msg)
+                        # TODO Perform action
+                        # self.add_kernel_route(str(_node_ip), _str_next_hop)
+                else:
+                    self._to_syslog("Address ERROR", "{node} destination does not have a valid IPv4 Address, Provided: {ip}".format(
+                        node = optionName,
+                        ip = value
+                    ))
+
+    def get_vrrp_status(self, _vlan_id, _vrrp_group):
+        """
+        Function to get the current VRRP status for a vlan
+        Parameters:
+        _vlan_id = VLAN ID to query
+        """
+        response = self.eapiMgr_.run_show_cmd("show vrrp interface vlan {id} group {group}".format(
+            id = _vlan_id.replace("vlan", ""),
+            group = _vrrp_group
+        ))
+        # self._to_syslog("DEBUG", str(response.to_string()))
+        if response.success():
+            json_response = json.loads(response.responses()[0])
+            if json_response["virtualRouters"]:
+                return(str(json_response["virtualRouters"][0]["state"]))
+            else:
+                return(False)
+        else:
+            return(False)
+
+
+    def find_route_prefix(self, _dest_ip):
+        """
+        Function to perform a lookup on the route table to find the destination route prefix
+        for a given destion host IP.
+        Parameters:
+        _dest_ip = IP Address for the host (IP Addr_object)
+        """
+        for _route in self.fibMgr_.fib_route_iter():
+            if _route.route_type() != eossdk.ROUTE_TYPE_KERNEL:
+                _tmp_prefix = ipaddress.ip_network(u"{network}".format(
+                    network = _route.route_key().prefix().to_string()
+                ))
+                if _dest_ip in _tmp_prefix:
+                    self._to_syslog("OK", "Host {host} is in {route}".format(
+                        host = str(_dest_ip),
+                        route  = _route.route_key().prefix().to_string()
+                    ))
+                    return(_route)
+        else:
+            return(False)
+    
+    def get_route_via(self, _ip_route):
+        """
+        Function to get the next hop for a specified route.
+        Parameters:
+        _ip_route = EosSdk ip_route type
+        """
+        _fec_id = _ip_route.fec_id()
+        _tmp_fec = self.fibMgr_.fib_fec(eossdk.FibFecKey(_fec_id))
+        _route_via = _tmp_fec.via()
+        return(_route_via[0])
+        
+
+    def on_route_set(self, _fib_route_update):
+        if _fib_route_update.route_type() != eossdk.ROUTE_TYPE_KERNEL:
+            _route = _fib_route_update.route_key()
+            _route_prefix = ipaddress.ip_network(u"{network}".format(
+                network = _route.prefix().to_string()
+            ))
+            for _host in ALL_HOSTS:
+                _dest_host = ALL_HOSTS[_host]
+                if _dest_host.full_ip in _route_prefix:
+                    # Grab information about the route for next-hop
+                    _fec_id = _fib_route_update.fec_id()
+                    _tmp_fec = self.fibMgr_.fib_fec(eossdk.FibFecKey(_fec_id))
+                    _route_via = _tmp_fec.via()
+                    if len(_route_via) > 0:
+                        _str_route_via = _route_via[0].intf().to_string()
+                        if _dest_host.next_hop != _str_route_via:
+                            self._to_syslog("INFO", "Updated {host} host to {hop} next-hop".format(
+                                host = str(_dest_host.full_ip),
+                                hop = _str_route_via
+                            ))
+                            if "Ethernet" in _str_route_via:
+                                for vlan in ALL_VLANS:
+                                    _vlan = ALL_VLANS[vlan]
+                                    if self.setPriority(_vlan.vlan_id, _vlan.vrrp_id, self.MASTER):
+                                        self._to_syslog("UPDATE", "Setting the VRRP priority to {level} for VLAN {vlan}".format(
+                                            level = self.MASTER,
+                                            vlan = vlan.replace("vlan", "")
+                                        ))
+                                # Loop through all VLANs again after the priority has been changed
+                                time.sleep(DEFAULT_DELAY)
+                                for vlan in ALL_VLANS:
+                                    _vlan = ALL_VLANS[vlan]
+                                    status = self.get_vrrp_status(_vlan.vlan_id, _vlan.vrrp_id)
+                                    if not status:
+                                        status = "Not Active"
+                                    self.agentMgr_.status_set(vlan, status)
+                                    self._to_syslog("INFO", "VRRP for VLAN {vlan} is currently {status}".format(
+                                        vlan = vlan.replace("vlan", ""),
+                                        status = status
+                                    ))
+                                    _vlan.status = status
+                                    ALL_VLANS[vlan] = _vlan
+                            # Prepare for updated static route
+                            _dest_host.set_next_hop(_str_route_via)
+                            _dest_host.set_msg("{network} network via {hop} next-hop".format(
+                                network = _dest_host.route_network,
+                                hop = _str_route_via
+                            ))
+                            self.agentMgr_.status_set(_host, _dest_host.status_msg)
+                            ALL_HOSTS[_host] = _dest_host
+                        self._to_syslog("INFO", "Route to {dest} via {hop}".format(
+                            dest = _fib_route_update.route_key().prefix().to_string(),
+                            hop = _str_route_via
+                        ))
+
+    def on_route_del(self, _fib_route_key):
+        _route_prefix = ipaddress.ip_network(u"{network}".format(
+            network = _fib_route_key.prefix().to_string()
+        ))
+        for _host in ALL_HOSTS:
+            _dest_host = ALL_HOSTS[_host]
+            if _dest_host.full_ip in _route_prefix:
+                self._to_syslog("ROUTE DELETED", "Route has been removed {route}".format(
+                    route = _fib_route_key.prefix().to_string()
+                ))
+                _dest_host.set_next_hop("None")
+                _dest_host.set_msg("{network} network Route was deleted".format(
+                    network = _dest_host.route_network,
+                ))
+                self.agentMgr_.status_set(_host, _dest_host.status_msg)
+                ALL_HOSTS[_host] = _dest_host
+                for vlan in ALL_VLANS:
+                    _vlan = ALL_VLANS[vlan]
+                    if self.setPriority(_vlan.vlan_id, _vlan.vrrp_id, self.STANDBY):
+                        self._to_syslog("UPDATE", "Set the VRRP priority to {level} for VLAN {vlan}".format(
+                            level = self.STANDBY,
+                            vlan = vlan.replace("vlan", "")
+                        ))
+                time.sleep(DEFAULT_DELAY)
+                for vlan in ALL_VLANS:
+                    _vlan = ALL_VLANS[vlan]
+                    status = self.get_vrrp_status(_vlan.vlan_id, _vlan.vrrp_id)
+                    if not status:
+                        status = "Not Active"
+                    self.agentMgr_.status_set(vlan, status)
+                    self._to_syslog("INFO", "VRRP for VLAN {vlan} is currently {status}".format(
+                        vlan = vlan.replace("vlan", ""),
+                        status = status
+                    ))
+                    _vlan.status = status
+                ALL_VLANS[vlan] = _vlan
+                    
+    def setPriority(self,vlan_id, vrrp_id, priority):
+        """
+        Function to set the vrrp priority for a vlan over eAPI
+        """
+        response = self.eapiMgr_.run_config_cmds([
+            "interface vlan{id}".format(
+                id = vlan_id.replace("vlan", "")
+            ),
+            "vrrp {id} priority-level {level}".format(
+                id = vrrp_id,
+                level = priority
+            )
+        ])
+        if response.success():
+            return(True)
+        else:
+            return(False)
+
+    def verify_ip_addr(self, ip_string):
+        """
+        Function to check if provided IP is valid.
+        Parameters:
+        ip_string = IP Address (10.10.10.10)
+        """
+        self._to_syslog("INFO", "Verifying provided host address of {ip}".format(
+            ip = ip_string
+        ))
+        try:
+            _ip_addr = ipaddress.ip_address(u"{}".format(ip_string))
+            return(_ip_addr)
+        except:
+            return(False)
+
+
+    def _remove_host(self,rem_device):
+        #Function to remove the old status and device from list
+        if ALL_HOSTS:
+            if rem_device in ALL_HOSTS:
+                _host = ALL_HOSTS[rem_device]
+                self.agentMgr_.status_del(rem_device)
+                # Remove any static route for host
+                # self.remove_kernel_route(str(_host.full_ip), str(_host.next_hop))
+                try:
+                    ALL_HOSTS.pop(rem_device)
+                except:
+                    self._to_syslog("Option ERROR", "Option {name} not found internally, not removing".format(
+                        name = rem_device
+                    ))
+
+    def _to_syslog(self, sys_type, sys_msg):
+        syslog.syslog("%%SDK-RouteTrack-Log-6-LOG: {type}: {msg}".format(
+            type = sys_type,
+            msg = sys_msg
+        ))
+    
+        
+
+if __name__ == '__main__':
+    syslog.openlog('SDK-RouteTrack-Log',0,syslog.LOG_LOCAL4)
+    sdk = eossdk.Sdk()
+    _ = ROUTETRACK(sdk.get_fib_mgr(eossdk.MODE_TYPE_READ_NOTIFYING),sdk.get_agent_mgr(), sdk.get_vrf_mgr(), sdk.get_eapi_mgr())
+    sdk.main_loop(sys.argv)
