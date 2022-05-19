@@ -52,7 +52,7 @@ ALL_VLANS = {}
 DEFAULT_MASTER = 110
 DEFAULT_STANDBY = 90
 DEFAULT_VRF = "default"
-DEFAULT_DELAY = 8
+DEFAULT_DELAY = 4
 
 class DESTHOST():
     def __init__(self, host_name, host_ip):
@@ -355,6 +355,10 @@ class ROUTETRACK(eossdk.AgentHandler, eossdk.FibHandler, eossdk.VrfHandler, eoss
         
 
     def on_route_set(self, _fib_route_update):
+        """
+        EOS SDK Built-in FIB function call back. Method is called when a tracked route
+        is Added or Updated.
+        """
         if _fib_route_update.route_type() != eossdk.ROUTE_TYPE_KERNEL:
             _route = _fib_route_update.route_key()
             _route_prefix = ipaddress.ip_network(u"{network}".format(
@@ -374,28 +378,61 @@ class ROUTETRACK(eossdk.AgentHandler, eossdk.FibHandler, eossdk.VrfHandler, eoss
                                 host = str(_dest_host.full_ip),
                                 hop = _str_route_via
                             ))
-                            if "Ethernet" in _str_route_via:
+                            _tmp_cmds = []
+                            if ("Ethernet" in _str_route_via) or ("Port-Channel" in _str_route_via):
                                 for vlan in ALL_VLANS:
                                     _vlan = ALL_VLANS[vlan]
-                                    if self.setPriority(_vlan.vlan_id, _vlan.vrrp_id, self.MASTER):
-                                        self._to_syslog("UPDATE", "Setting the VRRP priority to {level} for VLAN {vlan}".format(
+                                    _tmp_cmds.append("interface vlan{id}".format(
+                                        id = _vlan.vlan_id.replace("vlan", "")
+                                    ))
+                                    _tmp_cmds.append("vrrp {id} priority-level {level}".format(
+                                        id = _vlan.vrrp_id,
+                                        level = self.MASTER
+                                    ))
+                                    self._to_syslog("UPDATE", "Setting the VRRP priority to {level} for VLAN {vlan}".format(
                                             level = self.MASTER,
                                             vlan = vlan.replace("vlan", "")
                                         ))
-                                # Loop through all VLANs again after the priority has been changed
-                                time.sleep(DEFAULT_DELAY)
+                                if _tmp_cmds:
+                                    if self.setPriority(_tmp_cmds):
+                                        self._to_syslog("OK", "Updates made to VRRP/VLANs priority levels to level {level}".format(
+                                            level = self.MASTER
+                                        ))
+                            # Catch all for intferface next-hops that are not an Ethernet Interface for Port-Channel
+                            else:
+                                # Loop through all the VLANS/VRRP IDs and set to standby priority level
                                 for vlan in ALL_VLANS:
                                     _vlan = ALL_VLANS[vlan]
-                                    status = self.get_vrrp_status(_vlan.vlan_id, _vlan.vrrp_id)
-                                    if not status:
-                                        status = "Not Active"
-                                    self.agentMgr_.status_set(vlan, status)
-                                    self._to_syslog("INFO", "VRRP for VLAN {vlan} is currently {status}".format(
-                                        vlan = vlan.replace("vlan", ""),
-                                        status = status
+                                    _tmp_cmds.append("interface vlan{id}".format(
+                                        id = _vlan.vlan_id.replace("vlan", "")
                                     ))
-                                    _vlan.status = status
-                                    ALL_VLANS[vlan] = _vlan
+                                    _tmp_cmds.append("vrrp {id} priority-level {level}".format(
+                                        id = _vlan.vrrp_id,
+                                        level = self.STANDBY
+                                    ))
+                                    self._to_syslog("UPDATE", "Setting the VRRP priority to {level} for VLAN {vlan}".format(
+                                        level = self.STANDBY,
+                                        vlan = vlan.replace("vlan", "")
+                                    ))
+                                if _tmp_cmds:
+                                    if self.setPriority(_tmp_cmds):
+                                        self._to_syslog("OK", "Updates made to VRRP/VLANs priority levels to level {level}".format(
+                                            level = self.STANDBY
+                                        ))
+                            # Loop through all VLANs again after the priority has been changed
+                            time.sleep(DEFAULT_DELAY)
+                            for vlan in ALL_VLANS:
+                                _vlan = ALL_VLANS[vlan]
+                                status = self.get_vrrp_status(_vlan.vlan_id, _vlan.vrrp_id)
+                                if not status:
+                                    status = "Not Active"
+                                self.agentMgr_.status_set(vlan, status)
+                                self._to_syslog("INFO", "VRRP for VLAN {vlan} is currently {status}".format(
+                                    vlan = vlan.replace("vlan", ""),
+                                    status = status
+                                ))
+                                _vlan.status = status
+                                ALL_VLANS[vlan] = _vlan
                             # Prepare for updated static route
                             _dest_host.set_next_hop(_str_route_via)
                             _dest_host.set_msg("{network} network via {hop} next-hop".format(
@@ -410,6 +447,10 @@ class ROUTETRACK(eossdk.AgentHandler, eossdk.FibHandler, eossdk.VrfHandler, eoss
                         ))
 
     def on_route_del(self, _fib_route_key):
+        """
+        EOS SDK Built-in FIB function call back. Method is called when a tracked route
+        is Deleted/Removed.
+        """
         _route_prefix = ipaddress.ip_network(u"{network}".format(
             network = _fib_route_key.prefix().to_string()
         ))
@@ -425,12 +466,24 @@ class ROUTETRACK(eossdk.AgentHandler, eossdk.FibHandler, eossdk.VrfHandler, eoss
                 ))
                 self.agentMgr_.status_set(_host, _dest_host.status_msg)
                 ALL_HOSTS[_host] = _dest_host
+                _tmp_cmds = []
                 for vlan in ALL_VLANS:
                     _vlan = ALL_VLANS[vlan]
-                    if self.setPriority(_vlan.vlan_id, _vlan.vrrp_id, self.STANDBY):
-                        self._to_syslog("UPDATE", "Set the VRRP priority to {level} for VLAN {vlan}".format(
-                            level = self.STANDBY,
-                            vlan = vlan.replace("vlan", "")
+                    _tmp_cmds.append("interface vlan{id}".format(
+                        id = _vlan.vlan_id.replace("vlan", "")
+                    ))
+                    _tmp_cmds.append("vrrp {id} priority-level {level}".format(
+                        id = _vlan.vrrp_id,
+                        level = self.STANDBY
+                    ))
+                    self._to_syslog("UPDATE", "Set the VRRP priority to {level} for VLAN {vlan}".format(
+                        level = self.STANDBY,
+                        vlan = vlan.replace("vlan", "")
+                    ))
+                if _tmp_cmds:
+                    if self.setPriority(_tmp_cmds):
+                        self._to_syslog("OK", "Updates made to VRRP/VLANs priority levels to level {level}".format(
+                            level = self.STANDBY
                         ))
                 time.sleep(DEFAULT_DELAY)
                 for vlan in ALL_VLANS:
@@ -444,21 +497,13 @@ class ROUTETRACK(eossdk.AgentHandler, eossdk.FibHandler, eossdk.VrfHandler, eoss
                         status = status
                     ))
                     _vlan.status = status
-                ALL_VLANS[vlan] = _vlan
+                    ALL_VLANS[vlan] = _vlan
                     
-    def setPriority(self,vlan_id, vrrp_id, priority):
+    def setPriority(self,eapi_cmds):
         """
         Function to set the vrrp priority for a vlan over eAPI
         """
-        response = self.eapiMgr_.run_config_cmds([
-            "interface vlan{id}".format(
-                id = vlan_id.replace("vlan", "")
-            ),
-            "vrrp {id} priority-level {level}".format(
-                id = vrrp_id,
-                level = priority
-            )
-        ])
+        response = self.eapiMgr_.run_config_cmds(eapi_cmds)
         if response.success():
             return(True)
         else:
