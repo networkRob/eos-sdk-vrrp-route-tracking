@@ -57,8 +57,9 @@ daemon VRRPRouteTracking
 option master value {master_value}
 option standby value {standby_value}
 ```
-**`master_value` **(optional)** Specify a specific priority level for the node to become the VRRP Master**
-**`standby_value` **(optional)** Specify a specific priority level for the node to become the VRRP Backup**
+*`master_value` **(optional)** Specify a specific priority level for the node to become the VRRP Master*
+
+*`standby_value` **(optional)** Specify a specific priority level for the node to become the VRRP Backup*
 
 3. To add VLANs and VRRP IDs to be modified for priority-level, the following commands will need to be added to the agent config:
 ```
@@ -66,9 +67,9 @@ config
 daemon VRRPRouteTracking
 option vlan{vlan_id} value {vrrp_id}
 ```
-**`vlan_id` needs to be the VLAN ID for the VLAN interface that has the VRRP config. (integer)**
+*`vlan_id` needs to be the VLAN ID for the VLAN interface that has the VRRP config. (integer)*
 
-**`vrrp_id` needs to be the VRRP ID number configured for the appropriate VLAN Interface config. (integer)**
+*`vrrp_id` needs to be the VRRP ID number configured for the appropriate VLAN Interface config. (integer)*
 
 4. In order for this agent to create a static kernel route for specific destinations, the following commands will need to be taken:
 ```
@@ -76,9 +77,9 @@ config
 daemon VRRPRouteTracking
 option {destination_name} value {ip_of_destination}
 ```
-**`destination_name` needs to be a unique identifier for each remote switch/device**
+*`destination_name` needs to be a unique identifier for each remote switch/device*
 
-**`ip_of_destination` needs to be a valid IPv4 address for the destination address for the route to be created**
+*`ip_of_destination` needs to be a valid IPv4 address for the destination address for the route to be created*
 
 ***To see what unique peer identifiers have been created, enter `show daemon VRRPRouteTracking`***
 
