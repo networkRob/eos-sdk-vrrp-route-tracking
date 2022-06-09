@@ -356,6 +356,8 @@ class ROUTETRACK(eossdk.AgentHandler, eossdk.FibHandler, eossdk.VrfHandler, eoss
         _tmp_fec = self.fibMgr_.fib_fec(eossdk.FibFecKey(_fec_id))
         _route_via = _tmp_fec.via()
         _route_next_hop = _route_via[0].hop().to_string()
+        if "Unknown" in _route_next_hop:
+            _route_next_hop = _route_via[0].intf().to_string()
         return(_route_next_hop)
         
 
@@ -384,7 +386,7 @@ class ROUTETRACK(eossdk.AgentHandler, eossdk.FibHandler, eossdk.VrfHandler, eoss
                                 hop = _str_route_via
                             ))
                             _tmp_cmds = []
-                            if ("Ethernet" in _str_route_via) or ("Port-Channel" in _str_route_via):
+                            if ("Ethernet" in _str_route_via) or ("Port-Channel" in _str_route_via) or ("Dynamic" in _str_route_via):
                                 for vlan in ALL_VLANS:
                                     _vlan = ALL_VLANS[vlan]
                                     _tmp_cmds.append("interface vlan{id}".format(
@@ -403,7 +405,7 @@ class ROUTETRACK(eossdk.AgentHandler, eossdk.FibHandler, eossdk.VrfHandler, eoss
                                         self._to_syslog("OK", "Updates made to VRRP/VLANs priority levels to level {level}".format(
                                             level = self.MASTER
                                         ))
-                            # Catch all for intferface next-hops that are not an Ethernet Interface for Port-Channel
+                            # Catch all for intferface next-hops that are not an Ethernet, Port-Channel or Dynamic Tunnel Interface
                             else:
                                 # Loop through all the VLANS/VRRP IDs and set to standby priority level
                                 for vlan in ALL_VLANS:
