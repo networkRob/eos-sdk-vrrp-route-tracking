@@ -132,13 +132,17 @@ class ROUTETRACK(eossdk.AgentHandler, eossdk.FibHandler, eossdk.VrfHandler, eoss
                     #     value = 'ns-' + value
                     self._to_syslog("INFO", "VRF value changed from %s to %s"%(self.VRF,value))
                     self.VRF = value
+                    self.agentMgr_.status_set("VRF", str(self.VRF))
+                    self.fibMgr_.register_vrf(self.VRF, True)
                 else:
                     self._to_syslog("INFO", "VRF {vrf} is not configured on this device. Please configure it first.".format(
                         vrf = value
                     ))
             else:
                 self._to_syslog("INFO", "VRF value changed from %s to default"%(self.VRF))
+                self.fibMgr_.register_vrf(self.VRF, False)
                 self.VRF = 'default'
+                self.agentMgr_.status_set("VRF", str(self.VRF))
         # Check if vlan is in option name
         elif "vlan" in optionName.lower():
             _vlan_id = optionName.lower()
@@ -279,7 +283,7 @@ class ROUTETRACK(eossdk.AgentHandler, eossdk.FibHandler, eossdk.VrfHandler, eoss
                     route_prefix = self.find_route_prefix(_node_ip)
                     if route_prefix:
                         _route_via = self.get_route_via(route_prefix)
-                        _str_next_hop = _route_via.intf().to_string()
+                        _str_next_hop = _route_via
                         _str_route_prefix = route_prefix.route_key().prefix().to_string()
                         self._to_syslog("INFO", "Found {route} route via destination {via}".format(
                             route = _str_route_prefix,
@@ -351,7 +355,8 @@ class ROUTETRACK(eossdk.AgentHandler, eossdk.FibHandler, eossdk.VrfHandler, eoss
         _fec_id = _ip_route.fec_id()
         _tmp_fec = self.fibMgr_.fib_fec(eossdk.FibFecKey(_fec_id))
         _route_via = _tmp_fec.via()
-        return(_route_via[0])
+        _route_next_hop = _route_via[0].hop().to_string()
+        return(_route_next_hop)
         
 
     def on_route_set(self, _fib_route_update):
