@@ -1,7 +1,7 @@
 Summary: VRRPRouteTracking
 Name: VRRPRouteTracking
-Version: 0.2.1
-Release: 3
+Version: 0.3.0
+Release: 1
 License: Arista Networks
 Group: EOS/Extension
 Source0: %{name}-%{version}-%{release}.tar
